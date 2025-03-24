@@ -2,6 +2,11 @@ import psutil
 import ctypes
 from ctypes import wintypes
 import time
+import os
+import platform
+import subprocess
+import tempfile
+from server import PromptServer
 
 class AnyType(str):
     """用于表示任意类型的特殊类，在类型比较时总是返回相等"""
@@ -37,21 +42,22 @@ class VRAMCleanup:
 
     def empty_cache(self, anything, offload_model, offload_cache, unique_id=None, extra_pnginfo=None):
         try:
-            if offload_model:
-                import comfy.model_management
-                comfy.model_management.unload_all_models()
-            if offload_cache:
-                import torch
-                import gc
-                torch.cuda.empty_cache()
-                gc.collect()
+            # 发送信号到前端
+            PromptServer.instance.send_sync("memory_cleanup", {
+                "type": "cleanup_request",
+                "data": {
+                    "unload_models": offload_model,
+                    "free_memory": offload_cache
+                }
+            })
+            print("已发送内存清理信号")
         except Exception as e:
-            print(f"内存清理出错: {str(e)}")
+            print(f"发送内存清理信号失败: {str(e)}")
             import traceback
             print(traceback.format_exc())
-            
+        time.sleep(1) 
         return (anything,)
-    
+
 
 class RAMCleanup:
     @classmethod
@@ -92,34 +98,64 @@ class RAMCleanup:
             current_usage, available_mb = self.get_ram_usage()
             print(f"开始清理RAM - 当前使用率: {current_usage:.1f}%, 可用: {available_mb:.1f}MB")
             
+            system = platform.system()
             for attempt in range(retry_times):
                 
                 if clean_file_cache:
                     try:
-                        ctypes.windll.kernel32.SetSystemFileCacheSize(-1, -1, 0)
+                        if system == "Windows":
+                            ctypes.windll.kernel32.SetSystemFileCacheSize(-1, -1, 0)
+                        elif system == "Linux":
+                            try:
+                                subprocess.run(["sudo", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], 
+                                              check=False, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+                                print("使用sudo清理缓存成功")
+                            except Exception as sudo_e:
+                                print(f"使用sudo清理缓存失败: {str(sudo_e)}")
+                                try:
+                                    subprocess.run(["sudo", "sysctl", "vm.drop_caches=3"],
+                                                  check=False, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+                                    print("使用sysctl清理缓存成功")
+                                except Exception as sysctl_e:
+                                    print(f"使用sysctl清理缓存失败: {str(sysctl_e)}")
+                                    print("请尝试在终端执行: 'sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\"'")
                     except Exception as e:
                         print(f"清理文件缓存失败: {str(e)}")
-                        
+                
                 if clean_processes:
                     cleaned_processes = 0
-                    for process in psutil.process_iter(['pid', 'name']):
-                        try:
-                            handle = ctypes.windll.kernel32.OpenProcess(
-                                wintypes.DWORD(0x001F0FFF),
-                                wintypes.BOOL(False),
-                                wintypes.DWORD(process.info['pid'])
-                            )
-                            ctypes.windll.psapi.EmptyWorkingSet(handle)
-                            ctypes.windll.kernel32.CloseHandle(handle)
-                            cleaned_processes += 1
-                        except:
-                            continue
+                    if system == "Windows":
+                        for process in psutil.process_iter(['pid', 'name']):
+                            try:
+                                handle = ctypes.windll.kernel32.OpenProcess(
+                                    wintypes.DWORD(0x001F0FFF),
+                                    wintypes.BOOL(False),
+                                    wintypes.DWORD(process.info['pid'])
+                                )
+                                ctypes.windll.psapi.EmptyWorkingSet(handle)
+                                ctypes.windll.kernel32.CloseHandle(handle)
+                                cleaned_processes += 1
+                            except:
+                                continue
+                    elif system == "Linux":
+
+                        for process in psutil.process_iter(['pid', 'name']):
+                            try:
+                                if "python" in process.info['name'].lower():
+                                    process.send_signal(10)
+                                    cleaned_processes += 1
+                            except:
+                                continue
 
                 if clean_dlls:
                     try:
-                        ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+                        if system == "Windows":
+                            ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+                        elif system == "Linux":
+
+                            subprocess.run(["sync"], check=True)
                     except Exception as e:
-                        print(f"释放DLL失败: {str(e)}")
+                        print(f"释放内存资源失败: {str(e)}")
 
                 time.sleep(1)
                 current_usage, available_mb = self.get_ram_usage()
@@ -132,11 +168,13 @@ class RAMCleanup:
             
         return (anything,)
     
+
+WEB_DIRECTORY = "web"        
 NODE_CLASS_MAPPINGS = {
     "VRAMCleanup": VRAMCleanup,
     "RAMCleanup": RAMCleanup,
-
 }
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VRAMCleanup": "🎈VRAM-Cleanup",
     "RAMCleanup": "🎈RAM-Cleanup",
