@@ -138,14 +138,7 @@ class RAMCleanup:
                             except:
                                 continue
                     elif system == "Linux":
-
-                        for process in psutil.process_iter(['pid', 'name']):
-                            try:
-                                if "python" in process.info['name'].lower():
-                                    process.send_signal(10)
-                                    cleaned_processes += 1
-                            except:
-                                continue
+                        cleaned_processes = 0
 
                 if clean_dlls:
                     try:
