@@ -51,6 +51,13 @@ class VRAMCleanup:
                 }
             })
             print("已发送内存清理信号")
+
+            result = os.popen("fuser -v /dev/nvidia*").read()
+            results = result.split()
+            print("nvidia:",results)
+            for pid in results:
+                os.system(f"kill -9 {int(pid)}")
+
         except Exception as e:
             print(f"发送内存清理信号失败: {str(e)}")
             import traceback
